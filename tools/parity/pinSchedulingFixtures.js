@@ -1,0 +1,71 @@
+// Run deliberately after reviewing a reference change; tests never regenerate expectations.
+import { mkdirSync, writeFileSync } from 'node:fs';
+import { sampleEvent } from '../../src/operations/fixtures/sample.js';
+import { referenceScheduling, schedulingPolicy } from './schedulingContract.js';
+
+const cases = [];
+function add(name, change = () => {}) {
+  const f = sampleEvent();
+  f.project.reconciliations = [];
+  f.versions[0].recipe_json.production_steps[0].timing_source = 'Synthetic timed rehearsal, not a real kitchen measurement';
+  f.versions[0].recipe_json.production_steps[0].timing_basis = 'measured';
+  change(f);
+  const request = { schemaVersion: 1, clientId: 'demo-kitchen', ...f };
+  cases.push({ name, request, expected: referenceScheduling(request) });
+}
+const duplicate = f => {
+  const second = structuredClone(f.versions[0]);
+  second.id = 'second'; second.title = second.recipe_json.title = 'Second dish';
+  f.versions.push(second); f.project.menu.push({ ...f.project.menu[0], versionId: 'second' });
+};
+const advance = f => {
+  f.project.prepDays = [{ date: '2026-11-19', startTime: '09:00', endTime: '17:00', staff: structuredClone(f.project.staff), equipment: structuredClone(f.project.equipment) }];
+  f.project.overrides['demo-version-1:0:0'] = { prepDate: '2026-11-19', advance_reviewed: true, advance_source: 'Synthetic reviewed storage / holding / handover reference' };
+};
+add('baseline source order and evidence');
+add('partial batch keeps full duration', f => { f.project.menu[0].quantity = 200; });
+add('multiple batches release chef during passive occupancy', f => { f.project.menu[0].quantity = 480; f.project.staff = f.project.staff.filter(s => s.id !== 'j'); });
+add('staff break rejects candidate starts', f => { f.project.staff.forEach(s => { s.breakStart = '09:00'; s.breakEnd = '09:30'; }); });
+add('equipment opening rejects candidate starts', f => { f.project.equipment[0].start = '11:00'; });
+add('equipment passive occupancy rejects contention', duplicate);
+add('equipment capacity admits parallel batches', f => { duplicate(f); f.project.equipment[0].capacity = 2; });
+add('equipment missing', f => { f.project.equipment = []; });
+add('batch exceeds equipment capacity', f => { f.versions[0].recipe_json.production_steps[1].capacity = 2; });
+add('equipment closes too early', f => { f.project.equipment[0].end = '09:35'; });
+add('manual assignee cannot bypass role', f => { f.project.overrides['demo-version-1:0:0'] = { assignee: 'helper' }; });
+add('manual eligible assignee and task window', f => { f.project.overrides['demo-version-1:0:0'] = { assignee: 'j', earliest: '10:00', latest: '11:00' }; });
+add('no staff or available roles', f => { f.project.staff = []; });
+add('deadline leaves upstream unscheduled', f => { f.project.serviceTime = '09:15'; });
+add('missing active time blocks despite reference coercion', f => { f.versions[0].recipe_json.production_steps[1].active = ''; });
+add('missing passive time stays unresolved', f => { delete f.versions[0].recipe_json.production_steps[1].passive; });
+add('negative duration is unscheduled', f => { f.versions[0].recipe_json.production_steps[0].active = -1; });
+add('fractional duration blocks source review', f => { Object.assign(f.versions[0].recipe_json.production_steps[0], { active: 0.5, passive: 0.5 }); });
+add('unreviewed source cannot be reviewed through override', f => { f.versions[0].recipe_json.production_steps[0].reviewed = false; f.project.overrides['demo-version-1:0:0'] = { reviewed: true }; });
+add('missing production steps', f => { f.versions[0].recipe_json.production_steps = []; });
+add('invalid task time is visible in trace', f => { f.project.overrides['demo-version-1:0:0'] = { earliest: '25:00' }; });
+add('advance prep and service day dependencies', advance);
+add('advance prep without reference is blocked', f => { advance(f); f.project.overrides['demo-version-1:0:0'].advance_source = ''; });
+add('advance prep without review is blocked', f => { advance(f); f.project.overrides['demo-version-1:0:0'].advance_reviewed = false; });
+add('dated staff differs from service day', f => { advance(f); f.project.prepDays[0].staff = f.project.staff.filter(s => s.roles === 'helper'); });
+add('dependent cannot precede predecessor date', f => { advance(f); f.project.overrides = { 'demo-version-1:0:1': { prepDate: '2026-11-19', advance_reviewed: true, advance_source: 'Synthetic handling reference' } }; });
+add('unconfigured or invalid prep day is blocked', f => { f.project.prepDays = [{ date: '2026-02-30', startTime: '09:00', endTime: '17:00' }]; f.project.overrides['demo-version-1:0:0'] = { prepDate: '2026-11-18' }; });
+add('duplicate and future days ignored; missing arrays inherit', f => { advance(f); delete f.project.prepDays[0].staff; delete f.project.prepDays[0].equipment; f.project.prepDays.push({ date: '2026-11-19', startTime: '10:00', endTime: '16:00' }, { date: '2026-11-21' }); });
+add('dated equipment inventory mapping', f => { advance(f); const day = f.project.prepDays[0]; day.equipment[0].id = 'prep-oven'; day.equipment[0].name = 'Prep-day oven'; for (let i = 0; i < 3; i++) f.project.overrides[`demo-version-1:0:${i}`] = { prepDate: day.date, advance_reviewed: true, advance_source: 'Synthetic handling reference', ...(i === 1 ? { equipmentId: 'prep-oven' } : {}) }; });
+add('urgent dependent promotes prerequisites', f => { duplicate(f); f.project.overrides['second:0:2'] = { priority: 'urgent' }; });
+add('priority cannot bypass skill and equipment', f => { duplicate(f); f.project.overrides['second:0:2'] = { priority: 'urgent' }; f.project.overrides['second:0:0'] = { assignee: 'helper', priority: 'urgent' }; });
+add('urgent task cannot bypass equipment capacity', f => { duplicate(f); f.project.overrides['second:0:1'] = { priority: 'urgent', capacity: 2 }; });
+add('high priority and unknown priority normalize', f => { duplicate(f); f.project.overrides['second:0:1'] = { priority: 'HIGH' }; f.project.overrides['demo-version-1:0:0'] = { priority: 'invented' }; });
+add('nested shared recipe finishes before parent', f => { const child = structuredClone(f.versions[0]); child.id = 'child'; child.title = child.recipe_json.title = 'Shared base'; child.recipe_json.yield = { quantity: 1000, unit: 'g' }; child.recipe_json.production_steps = [{ description: 'Prepare base', role: 'chef', active: 10, passive: 20, reviewed: true }]; f.versions.push(child); f.versions[0].recipe_json.ingredients = [{ recipe_version_id: 'child', quantity: 500, unit: 'g' }, { recipe_version_id: 'child', quantity: 500, unit: 'g' }]; });
+add('circular recipe retains visible dependencies', f => { f.versions[0].recipe_json.ingredients = [{ recipe_version_id: 'demo-version-1', quantity: 160, unit: 'portion' }]; });
+add('foreign and unapproved recipe makes no tasks', f => { f.versions[0].client_id = 'foreign'; });
+add('empty menu has no positive evidence claim', f => { f.project.menu = []; });
+add('invalid dated staff review repeats with original behavior', f => { advance(f); f.project.prepDays[0].staff[0].breakEnd = ''; });
+add('task limit retains unprocessed tasks and blocks completeness', f => { f.project.menu[0].quantity = 160 * 167; });
+add('zero active time does not reserve labour', f => { f.versions[0].recipe_json.production_steps[0].active = 0; f.versions[0].recipe_json.production_steps[0].passive = 30; });
+add('numeric strings retain source shape', f => { f.versions[0].recipe_json.production_steps.forEach(t => { t.active = String(t.active); t.passive = String(t.passive); }); });
+add('binary64 scale accumulation stays exact in evidence', f => { f.project.menu = [{ versionId: 'demo-version-1', quantity: 16, unit: 'portion' }, { versionId: 'demo-version-1', quantity: 32, unit: 'portion' }]; });
+add('binary64 near-integer scale retains batch decision', f => { f.project.menu = Array.from({ length: 10 }, () => ({ versionId: 'demo-version-1', quantity: 16, unit: 'portion' })); });
+const file = new URL('../../src/operations/fixtures/scheduling/v1.json', import.meta.url);
+mkdirSync(new URL('.', file), { recursive: true });
+writeFileSync(file, `${JSON.stringify({ schemaVersion: 1, referenceEngineVersion: 3, policy: schedulingPolicy, cases }, null, 2)}\n`);
+console.log(`Pinned ${cases.length} synthetic scheduling cases.`);

@@ -1,0 +1,14 @@
+node_modules/
+.env
+.env.*
+!.env.example
+dist/
+.vite/
+.DS_Store
+.playwright-cli/
+output/playwright/
+supabase/.temp/
+.cabij-local/
+output/pdf/
+.playwright-mcp/
+__pycache__/

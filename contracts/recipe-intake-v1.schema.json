@@ -1,0 +1,23 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "CABIJ recipe intake V1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["client_id", "source_document_ref", "idempotency_key", "recipe"],
+  "properties": {
+    "client_id": { "type": "string", "minLength": 1 },
+    "source_document_ref": { "type": "string", "minLength": 1 },
+    "idempotency_key": { "type": "string", "minLength": 16 },
+    "recipe": {
+      "type": "object",
+      "required": ["recipe_ref_id", "canonical_id", "title", "ingredients", "yield"],
+      "properties": {
+        "recipe_ref_id": { "type": "string", "minLength": 1 },
+        "canonical_id": { "type": "string", "minLength": 1 },
+        "title": { "type": "string", "minLength": 1 },
+        "ingredients": { "type": "array", "minItems": 1 },
+        "yield": { "type": "object" }
+      }
+    }
+  }
+}

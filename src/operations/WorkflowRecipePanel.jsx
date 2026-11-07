@@ -1,0 +1,30 @@
+import React, { useState } from 'react';
+import { supabase } from '../supabaseClient.js';
+import { workflowRecipe } from './workflowRecipe.js';
+export function WorkflowRecipeCard({ source }) {
+  const recipe = workflowRecipe(source);
+  return <article className="op-source-recipe"><header><p className="op-eyebrow">{source.source_kind === 'document_upload' ? 'Uploaded recipe · pending chef review' : 'WF1 recipe output · pending chef review'}</p><h3>{recipe.title}</h3><p>{source.category || 'Category not supplied'}{source.cuisine ? ` · ${source.cuisine}` : ''}</p></header>
+    <p><strong>1 kg standard batch:</strong> {recipe.standardisation?.scale_factor ? 'Calculated automatically' : 'Needs a measurable mass yield or ingredient mass total'}{recipe.standardisation?.source_batch_g ? ` · source basis ${recipe.standardisation.source_batch_g} g · scale ×${Number(recipe.standardisation.scale_factor).toFixed(4)}` : ''}</p><p><strong>Cooked / usable yield:</strong> {recipe.standardisation?.usable_yield_g || recipe.standardisation?.cooked_yield_g ? `${recipe.standardisation.usable_yield_g || recipe.standardisation.cooked_yield_g} g per 1 kg batch` : 'Not measured yet'}{recipe.standardisation?.portions_per_kg ? ` · ${recipe.standardisation.portions_per_kg} portions at ${recipe.standardisation.portion_g} g` : ''}</p>
+    <div className="op-table-scroll"><table><thead><tr><th>Ingredient</th><th>Source amount</th><th>Quantity evidence</th></tr></thead><tbody>{recipe.ingredients.map((row,i) => <tr key={i}><td><strong>{row.clean_name || 'Name missing'}</strong>{row.product_form && <small>{row.product_form}</small>}</td><td>{row.display_quantity_text || `${row.source_quantity ?? 'Quantity missing'} ${row.unit}`}</td><td>{row.quantity_confidence || row.amount_kind || 'Review required'}</td></tr>)}</tbody></table></div>
+    <h4>Full preparation method</h4>{recipe.methodGenerated && <p className="op-exception">WF1 marks this method as generated. Check it against the original document.</p>}<div className="op-source-method">{recipe.method || 'Method not supplied. Review the original source.'}</div>
+    <p><strong>Allergen information:</strong> {source.allergens?.length ? source.allergens.join(', ') : 'Not supplied / verification required'}</p><p className="op-source-reference"><strong>Source:</strong> {recipe.sourceRef || 'Original document reference missing'}</p>
+    <details><summary>{recipe.warnings.length} review notes</summary><ul>{recipe.warnings.map((w,i)=><li key={i}>{w}</li>)}</ul></details>
+  </article>;
+}
+export default function WorkflowRecipePanel({ clientId, imports = [], onImported, onDraft, demo }) {
+  const [results,setResults]=useState(null),[execution,setExecution]=useState(''),[busy,setBusy]=useState(false),[message,setMessage]=useState('');
+  const request=async(path,body)=>{
+    const {data:{session}}=await supabase.auth.getSession();
+    const response=await fetch(`/api/local-n8n/${path}`,{...(body?{method:'POST'}:{}),headers:{Authorization:`Bearer ${session?.access_token||''}`,...(body?{'Content-Type':'application/json'}:{})},...(body?{body:JSON.stringify(body)}:{})});
+    if(!response.headers.get('content-type')?.includes('application/json'))throw new Error('Start the local dashboard server to connect to n8n.');
+    const data=await response.json();if(!response.ok)throw new Error(data.error);return data;
+  };
+  const run=async action=>{setBusy(true);setMessage('');try{await action();}catch(error){setMessage(error.message);}finally{setBusy(false);}};
+  const executions=results?[...new Map(results.recipes.map(r=>[r.executionId,r])).values()]:[];
+  return <section className="op-workflow-intake"><div className="op-section-head"><div><h3>Existing n8n recipes</h3><p>Read completed WF1 outputs, compare the original source, then create a reviewed recipe version.</p></div><button disabled={busy||demo} onClick={()=>run(async()=>{const data=await request(`recipes?clientId=${encodeURIComponent(clientId)}`);setResults(data);setExecution(data.recipes.find(r=>r.executionStatus==='success')?.executionId||data.recipes[0]?.executionId||'');setMessage(data.recipes.length?`Connected to ${data.workflow.name}.`:'WF1 has no saved final recipe output for this kitchen among the latest 20 runs.');})}>Load WF1 recipe results</button></div>
+    {demo&&<p>Use the connected kitchen workspace to read your real n8n recipes.</p>}<p role="status">{busy?'Reading workflow results…':message}</p>
+    {results&&<label>Workflow run<select value={execution} onChange={e=>setExecution(e.target.value)}>{executions.map(r=><option key={r.executionId} value={r.executionId}>Run {r.executionId} · {r.startedAt} · {r.executionStatus}</option>)}</select></label>}
+    {results?.recipes.filter(r=>r.executionId===execution).map(item=><details className="op-review" key={`${item.executionId}:${item.recipeIndex}`}><summary>{item.sourceRecipe.title||'Untitled recipe'}</summary>{item.executionStatus!=='success'&&<p className="op-exception">This run produced a final recipe output, but the overall workflow did not finish successfully. Review its downstream failure in n8n.</p>}<WorkflowRecipeCard source={item.sourceRecipe}/><button disabled={busy} onClick={()=>run(async()=>{const result=await request('import',{clientId,executionId:item.executionId,recipeIndex:item.recipeIndex});onImported(result.record);setMessage(result.duplicate?'This workflow recipe is already saved for review.':'Workflow recipe saved for review.');})}>Save this output for review</button></details>)}
+    {imports.length>0&&<h4>Saved workflow recipes</h4>}{imports.map(row=><details className="op-review" key={row.id}><summary>{row.source_recipe.title||'Untitled recipe'} · n8n run {row.execution_id}</summary><WorkflowRecipeCard source={row.source_recipe}/><button onClick={()=>{const recipe=workflowRecipe(row.source_recipe);onDraft({...recipe.draft,source_workflow_import_id:row.id,source_evidence_ids:[...recipe.draft.source_evidence_ids,`n8n:${row.workflow_id}/execution:${row.execution_id}/recipe:${row.recipe_index}`]});}}>Create recipe draft from this output</button></details>)}
+  </section>;
+}
